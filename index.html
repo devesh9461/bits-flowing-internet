@@ -123,12 +123,10 @@
       <div class="tagline">Build by AI. Assist by Devesh Jangid.</div>
     </header>
 
-    <section class="intro" aria-labelledby="page-title">
-      <div>
-        <div class="disclosure">
-          <span class="disclosure-icon" aria-hidden="true">ⓘ</span>
-          <span>This tool captures public IP network configurations and device metrics.</span>
-        </div>
+    <section class="intro" aria-label="Network data disclosure and actions">
+      <div class="disclosure">
+        <span class="disclosure-icon" aria-hidden="true">ⓘ</span>
+        <span>This tool captures public IP network configurations and device metrics.</span>
       </div>
       <button class="refresh" id="refresh-button" type="button">
         <span class="refresh-icon" aria-hidden="true">↻</span><span>Refresh Data</span>
@@ -141,14 +139,9 @@
       <article class="card">
         <div class="card-head"><span class="card-icon" aria-hidden="true">⌁</span><h2 class="card-title">Network Info</h2></div>
         <div class="metric">
-          <p class="metric-label">Public IP address</p>
-          <p class="metric-value large" id="public-ip">—</p>
-          <p class="metric-detail" id="ip-version">IP version —</p>
-        </div>
-        <div class="metric">
-          <p class="metric-label">Public IPv4</p>
-          <p class="metric-value" id="public-ipv4">—</p>
-          <p class="metric-detail" id="ipv4-detail">Checking IPv4 availability</p>
+          <p class="metric-label">Public IPv4 address</p>
+          <p class="metric-value large" id="public-ipv4">Checking…</p>
+          <p class="metric-detail" id="ipv4-detail">Looking up an IPv4 address only</p>
         </div>
         <div class="metric">
           <p class="metric-label">Internet provider</p>
@@ -204,8 +197,6 @@
     const ui = {
       button: document.querySelector("#refresh-button"),
       status: document.querySelector("#status"),
-      publicIp: document.querySelector("#public-ip"),
-      ipVersion: document.querySelector("#ip-version"),
       ipv4: document.querySelector("#public-ipv4"),
       ipv4Detail: document.querySelector("#ipv4-detail"),
       isp: document.querySelector("#isp"),
@@ -253,12 +244,6 @@
       };
     }
 
-    function identifyIpVersion(ip, versionFromApi) {
-      if (versionFromApi) return versionFromApi;
-      if (!ip) return "Unknown";
-      return ip.includes(":") ? "IPv6" : "IPv4";
-    }
-
     function isValidIPv4(value) {
       const octets = value.split(".");
       return octets.length === 4 && octets.every(octet =>
@@ -294,13 +279,22 @@
       return html + escapeHTML(value.slice(previousIndex));
     }
 
-    function buildPayload(networkResponse, ipv4, ipv4Source, ipv4Error, device) {
+    function buildPayload(metadata, ipv4, ipv4Error, device) {
       return {
         network: {
-          ...networkResponse,
           publicIPv4: ipv4,
-          publicIPv4Source: ipv4Source,
-          publicIPv4LookupNote: ipv4Error
+          isp: metadata.org || null,
+          asn: metadata.asn || null,
+          location: {
+            city: metadata.city || null,
+            region: metadata.region || null,
+            country: metadata.country_name || metadata.country || null,
+            countryCode: metadata.country_code || null,
+            latitude: metadata.latitude ?? null,
+            longitude: metadata.longitude ?? null,
+            timezone: metadata.timezone || null
+          },
+          ipv4LookupNote: ipv4Error
         },
         device,
         capturedAt: new Date().toISOString()
@@ -310,30 +304,23 @@
     function render(payload) {
       const network = payload.network;
       const location = [
-        network.city,
-        network.region,
-        network.country_name || network.country
+        network.location.city,
+        network.location.region,
+        network.location.country
       ].filter(Boolean);
-      const ipVersion = identifyIpVersion(network.ip, network.version);
 
-      ui.publicIp.textContent = network.ip || "Unavailable";
-      ui.ipVersion.textContent = `IP version ${ipVersion}`;
-      ui.ipv4.textContent = network.publicIPv4 || (ipVersion === "IPv4" ? network.ip : "Unavailable");
-      ui.ipv4Detail.textContent = network.publicIPv4Source === "IPv4-only endpoint"
-        ? "Resolved through an IPv4-only endpoint"
-        : network.publicIPv4Source === "primary lookup endpoint"
-          ? "Main network lookup returned an IPv4 address"
-        : ipVersion === "IPv4"
-          ? "Main network lookup returned an IPv4 address"
-          : network.publicIPv4LookupNote || "An IPv4 address is not available";
-      ui.isp.textContent = network.org || "Not provided";
+      ui.ipv4.textContent = network.publicIPv4 || "Unavailable";
+      ui.ipv4Detail.textContent = network.publicIPv4
+        ? "Resolved using an IPv4-only lookup"
+        : network.ipv4LookupNote || "IPv4 is unavailable on this connection";
+      ui.isp.textContent = network.isp || "Not provided";
       ui.asn.textContent = `Network ASN ${network.asn || "Not provided"}`;
       ui.location.textContent = location.join(", ") || "Not provided";
-      ui.countryCode.textContent = `Country code ${network.country_code || "Not provided"}`;
-      ui.coordinates.textContent = network.latitude != null && network.longitude != null
-        ? `${network.latitude}, ${network.longitude}`
+      ui.countryCode.textContent = `Country code ${network.location.countryCode || "Not provided"}`;
+      ui.coordinates.textContent = network.location.latitude != null && network.location.longitude != null
+        ? `${network.location.latitude}, ${network.location.longitude}`
         : "Not provided";
-      ui.timezone.textContent = `Time zone ${network.timezone || "Not provided"}`;
+      ui.timezone.textContent = `Time zone ${network.location.timezone || "Not provided"}`;
       ui.userAgent.textContent = payload.device.userAgent;
       ui.resolution.textContent = `${payload.device.screen.width} × ${payload.device.screen.height}`;
       ui.viewport.textContent = `${payload.device.viewport.width} × ${payload.device.viewport.height}`;
@@ -350,35 +337,28 @@
       try {
         // The independent IPv4 lookup runs alongside ipapi.co; both results are
         // collected before the dashboard and its JSON payload are updated.
-        const [networkResult, ipv4Result] = await Promise.allSettled([
+        const [metadataResult, ipv4Result] = await Promise.allSettled([
           fetchJson(API_URL),
           fetchJson(IPV4_URL)
         ]);
 
-        if (networkResult.status === "rejected") {
-          throw networkResult.reason;
-        }
-
-        const network = networkResult.value;
-        if (!network.ip) {
-          throw new Error(network.reason || network.error || "The lookup response did not contain an IP address.");
-        }
-
+        const metadata = metadataResult.status === "fulfilled" ? metadataResult.value : {};
         const candidateIPv4 = ipv4Result.status === "fulfilled" ? ipv4Result.value.ip : "";
-        const apiIPv4 = typeof candidateIPv4 === "string" && isValidIPv4(candidateIPv4);
-        const mainLookupIPv4 = identifyIpVersion(network.ip, network.version) === "IPv4" && isValidIPv4(network.ip);
-        const ipv4 = apiIPv4 ? candidateIPv4 : mainLookupIPv4 ? network.ip : null;
-        const ipv4Source = apiIPv4 ? "IPv4-only endpoint" : mainLookupIPv4 ? "primary lookup endpoint" : null;
+        const ipv4 = typeof candidateIPv4 === "string" && isValidIPv4(candidateIPv4)
+          ? candidateIPv4
+          : null;
         const ipv4Error = ipv4
           ? null
-          : "IPv4 address unavailable (no IPv4 route or lookup service error)";
-        const payload = buildPayload(network, ipv4, ipv4Source, ipv4Error, readDeviceDetails());
+          : "IPv4 address unavailable (this connection may not have IPv4 access)";
+        const payload = buildPayload(metadata, ipv4, ipv4Error, readDeviceDetails());
 
         render(payload);
-        const statusMessage = ipv4Error
-          ? "Network details updated. An IPv4 address could not be resolved on this network."
-          : "Network and device details updated.";
-        setStatus(statusMessage, ipv4Error ? "info" : "success");
+        const statusMessage = [
+          ipv4Error ? "IPv4 address unavailable." : "IPv4 details updated.",
+          metadataResult.status === "rejected" ? "Provider and location lookup unavailable." : ""
+        ].filter(Boolean).join(" ");
+        const hasError = ipv4Error || metadataResult.status === "rejected";
+        setStatus(statusMessage, hasError ? "info" : "success");
       } catch (error) {
         const message = error instanceof Error ? error.message : "Unexpected lookup error.";
         setStatus(`Could not load network details: ${message} Check your connection and try again.`, "error");
